@@ -23,6 +23,8 @@ def get_version():
 def init_db():
     conn = sqlite3.connect("social.db")
     c = conn.cursor()
+
+    # Alte Tabellen erstellen, falls sie nicht existieren
     c.execute('''CREATE TABLE IF NOT EXISTS users (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     username TEXT UNIQUE,
@@ -35,8 +37,19 @@ def init_db():
                     timestamp TEXT,
                     FOREIGN KEY(user_id) REFERENCES users(id)
                  )''')
+
+    # Spalte is_admin hinzufügen, falls sie noch nicht existiert
+    c.execute("PRAGMA table_info(users)")
+    columns = [row[1] for row in c.fetchall()]
+    if "is_admin" not in columns:
+        c.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER DEFAULT 0")
+
+    # Ersten User zum Admin machen
+    c.execute("UPDATE users SET is_admin = 1 WHERE id = 1")
+
     conn.commit()
     conn.close()
+
 
 init_db()
 
@@ -198,7 +211,19 @@ def index():
     feed_html += "<hr><h3>Allgemeiner Feed</h3>"
     for post_id, text, timestamp, username in all_posts:
         cls = "own-post" if username == session['username'] else ""
-        feed_html += f"<div class='post {cls}'><b>{escape(username)}</b> ({timestamp}): {escape(text)}</div>"
+        delete_btn = ""
+        if username == session['username'] or session.get('is_admin'):
+            delete_btn = f"""
+            <form method='POST' action='/delete' style='display:inline;'>
+                <input type='hidden' name='post_id' value='{post_id}'>
+                <button type='submit' class='delete-btn'>Löschen</button>
+            </form>
+            """
+        feed_html += f"""
+        <div class='post {cls}'>
+            <b>{escape(username)}</b> ({timestamp}): {escape(text)}
+            {delete_btn}
+        </div>"""
 
     return render_template(feed_html)
 
@@ -226,10 +251,9 @@ def delete_post():
     post_id = request.form['post_id']
     conn = sqlite3.connect("social.db")
     c = conn.cursor()
-    # Prüfen, ob der Post dem aktuellen User gehört
     c.execute("SELECT users.username FROM posts JOIN users ON posts.user_id = users.id WHERE posts.id=?", (post_id,))
     owner = c.fetchone()
-    if owner and owner[0] == session['username']:
+    if owner and (owner[0] == session['username'] or session.get('is_admin')):
         c.execute("DELETE FROM posts WHERE id=?", (post_id,))
         conn.commit()
     conn.close()
@@ -271,11 +295,12 @@ def login():
         password = request.form['password']
         conn = sqlite3.connect("social.db")
         c = conn.cursor()
-        c.execute("SELECT password_hash FROM users WHERE username=?", (username,))
+        c.execute("SELECT password_hash, is_admin FROM users WHERE username=?", (username,))
         result = c.fetchone()
         conn.close()
         if result and check_password_hash(result[0], password):
             session['username'] = username
+            session['is_admin'] = result[1] == 1
             return redirect("/")
         return render_template("<p>Login fehlgeschlagen!</p><a href='/login'>Zurück</a>")
 
@@ -293,6 +318,7 @@ def login():
 @app.route("/logout")
 def logout():
     session.pop('username', None)
+    session.pop('is_admin', None)
     return redirect("/login")
 
 
