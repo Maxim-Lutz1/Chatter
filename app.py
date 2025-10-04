@@ -19,17 +19,20 @@ def get_version():
     except FileNotFoundError:
         return "unknown"
 
-# Datenbank initialisieren
+# Datenbank initialisieren (inkl. is_admin + banned)
 def init_db():
     conn = sqlite3.connect("social.db")
     c = conn.cursor()
 
-    # Alte Tabellen erstellen, falls sie nicht existieren
-    c.execute('''CREATE TABLE IF NOT EXISTS users (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    username TEXT UNIQUE,
-                    password_hash TEXT
-                 )''')
+    # users-Tabelle: Spalten hinzufügen, falls sie noch nicht existieren
+    c.execute("PRAGMA table_info(users)")
+    columns = [row[1] for row in c.fetchall()]
+    if "is_admin" not in columns:
+        c.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER DEFAULT 0")
+    if "banned" not in columns:
+        c.execute("ALTER TABLE users ADD COLUMN banned INTEGER DEFAULT 0")
+    
+    # posts-Tabelle erstellen, falls sie nicht existiert
     c.execute('''CREATE TABLE IF NOT EXISTS posts (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_id INTEGER,
@@ -38,13 +41,7 @@ def init_db():
                     FOREIGN KEY(user_id) REFERENCES users(id)
                  )''')
 
-    # Spalte is_admin hinzufügen, falls sie noch nicht existiert
-    c.execute("PRAGMA table_info(users)")
-    columns = [row[1] for row in c.fetchall()]
-    if "is_admin" not in columns:
-        c.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER DEFAULT 0")
-
-    # Ersten User zum Admin machen
+    # Admin-ID 1 sicherstellen
     c.execute("UPDATE users SET is_admin = 1 WHERE id = 1")
 
     conn.commit()
@@ -53,7 +50,7 @@ def init_db():
 
 init_db()
 
-# HTML Template Helper mit Design + Plattformnamen + Version
+# HTML Template Helper
 def render_template(content):
     version = get_version()
     return f"""
@@ -136,10 +133,20 @@ def render_template(content):
             .delete-btn:hover {{
                 background-color: #cc0000;
             }}
-            .header {{
-                display: flex;
-                justify-content: space-between;
-                align-items: center;
+            .admin-btn {{
+                padding: 4px 8px;
+                font-size: 12px;
+                border-radius: 4px;
+                margin-left: 2px;
+            }}
+            table {{
+                width: 100%;
+                border-collapse: collapse;
+            }}
+            th, td {{
+                padding: 8px;
+                border-bottom: 1px solid #ddd;
+                text-align: left;
             }}
             a {{
                 color: #4267B2;
@@ -168,7 +175,7 @@ def render_template(content):
     """
 
 # Feed-Seite
-@app.route("/")
+@app.route("/", methods=["GET", "POST"])
 def index():
     if 'username' not in session:
         return redirect("/login")
@@ -176,28 +183,35 @@ def index():
     conn = sqlite3.connect("social.db")
     c = conn.cursor()
 
-    # Allgemeiner Feed
+    # Alle Posts
     c.execute("SELECT posts.id, posts.text, posts.timestamp, users.username FROM posts JOIN users ON posts.user_id = users.id ORDER BY posts.id DESC")
     all_posts = c.fetchall()
 
     # Eigene Posts
     c.execute("SELECT posts.id, posts.text, posts.timestamp FROM posts JOIN users ON posts.user_id = users.id WHERE users.username=? ORDER BY posts.id DESC", (session['username'],))
     own_posts = c.fetchall()
-    conn.close()
+
+    # Admin Info
+    is_admin = session.get('is_admin', False)
 
     feed_html = f"""
     <div class="header">
         <p>Angemeldet als <b>{escape(session['username'])}</b> | <a href='/logout'>Logout</a></p>
     </div>
-
-    <form method='POST' action='/post'>
-        <input name='text' placeholder='Neuer Post' required>
-        <button type='submit'>Posten</button>
-    </form>
-    <hr>
-
-    <h3>Eigene Posts</h3>
     """
+
+    # Bann prüfen
+    if session.get('banned', 0) == 1:
+        feed_html += "<p><b>Du bist gebannt und kannst keine Posts erstellen.</b></p>"
+    else:
+        feed_html += """
+        <form method='POST' action='/post'>
+            <input name='text' placeholder='Neuer Post' required>
+            <button type='submit'>Posten</button>
+        </form>
+        """
+
+    feed_html += "<hr><h3>Eigene Posts</h3>"
     for post_id, text, timestamp in own_posts:
         feed_html += f"""
         <div class='post own-post'>
@@ -211,27 +225,56 @@ def index():
     feed_html += "<hr><h3>Allgemeiner Feed</h3>"
     for post_id, text, timestamp, username in all_posts:
         cls = "own-post" if username == session['username'] else ""
-        delete_btn = ""
-        if username == session['username'] or session.get('is_admin'):
-            delete_btn = f"""
-            <form method='POST' action='/delete' style='display:inline;'>
-                <input type='hidden' name='post_id' value='{post_id}'>
-                <button type='submit' class='delete-btn'>Löschen</button>
-            </form>
-            """
-        feed_html += f"""
-        <div class='post {cls}'>
-            <b>{escape(username)}</b> ({timestamp}): {escape(text)}
-            {delete_btn}
-        </div>"""
+        feed_html += f"<div class='post {cls}'><b>{escape(username)}</b> ({timestamp}): {escape(text)}</div>"
 
+    # Admin Panel
+    if is_admin:
+        # Suchfilter
+        search = request.args.get('search', '')
+        c.execute("SELECT id, username, banned, is_admin FROM users WHERE username LIKE ? ORDER BY id ASC", (f"%{search}%",))
+        users = c.fetchall()
+        feed_html += "<hr><h3>Admin Panel</h3>"
+        feed_html += f"""
+        <form method='GET' action='/'>
+            <input type='text' name='search' placeholder='User suchen' value='{escape(search)}'>
+            <button type='submit'>Suchen</button>
+        </form>
+        <table>
+        <tr><th>Username</th><th>Status</th><th>Aktionen</th></tr>
+        """
+        for uid, uname, banned, admin_flag in users:
+            feed_html += f"<tr><td>{escape(uname)}</td><td>{'Admin' if admin_flag else ''}{' / Gebannt' if banned else ''}</td><td>"
+            if uid != 1:
+                if banned:
+                    feed_html += f"""
+                    <form method='POST' action='/unban' style='display:inline;'>
+                        <input type='hidden' name='user_id' value='{uid}'>
+                        <button type='submit' class='admin-btn'>Entbannen</button>
+                    </form>"""
+                else:
+                    feed_html += f"""
+                    <form method='POST' action='/ban' style='display:inline;'>
+                        <input type='hidden' name='user_id' value='{uid}'>
+                        <button type='submit' class='admin-btn'>Bannen</button>
+                    </form>"""
+                feed_html += f"""
+                <form method='POST' action='/delete_user' style='display:inline;'>
+                    <input type='hidden' name='user_id' value='{uid}'>
+                    <button type='submit' class='admin-btn'>Löschen</button>
+                </form>"""
+            feed_html += "</td></tr>"
+        feed_html += "</table>"
+
+    conn.close()
     return render_template(feed_html)
 
 # Neuer Post
 @app.route("/post", methods=["POST"])
 def post():
     if 'username' not in session:
-        return redirect("/login")
+        return redirect("/")
+    if session.get('banned', 0) == 1:
+        return redirect("/")
     text = request.form['text']
     conn = sqlite3.connect("social.db")
     c = conn.cursor()
@@ -247,15 +290,60 @@ def post():
 @app.route("/delete", methods=["POST"])
 def delete_post():
     if 'username' not in session:
-        return redirect("/login")
+        return redirect("/")
     post_id = request.form['post_id']
     conn = sqlite3.connect("social.db")
     c = conn.cursor()
+    # Prüfen, ob der Post dem aktuellen User gehört oder Admin
     c.execute("SELECT users.username FROM posts JOIN users ON posts.user_id = users.id WHERE posts.id=?", (post_id,))
     owner = c.fetchone()
-    if owner and (owner[0] == session['username'] or session.get('is_admin')):
+    if owner and (owner[0] == session['username'] or session.get('is_admin', False)):
         c.execute("DELETE FROM posts WHERE id=?", (post_id,))
         conn.commit()
+    conn.close()
+    return redirect("/")
+
+# User löschen
+@app.route("/delete_user", methods=["POST"])
+def delete_user():
+    if not session.get('is_admin', False):
+        return redirect("/")
+    user_id = request.form['user_id']
+    if int(user_id) == 1:
+        return redirect("/")
+    conn = sqlite3.connect("social.db")
+    c = conn.cursor()
+    c.execute("DELETE FROM posts WHERE user_id=?", (user_id,))
+    c.execute("DELETE FROM users WHERE id=?", (user_id,))
+    conn.commit()
+    conn.close()
+    return redirect("/")
+
+# Ban / Unban
+@app.route("/ban", methods=["POST"])
+def ban_user():
+    if not session.get('is_admin', False):
+        return redirect("/")
+    user_id = request.form['user_id']
+    if int(user_id) == 1:
+        return redirect("/")
+    conn = sqlite3.connect("social.db")
+    c = conn.cursor()
+    c.execute("DELETE FROM posts WHERE user_id=?", (user_id,))
+    c.execute("UPDATE users SET banned=1 WHERE id=?", (user_id,))
+    conn.commit()
+    conn.close()
+    return redirect("/")
+
+@app.route("/unban", methods=["POST"])
+def unban_user():
+    if not session.get('is_admin', False):
+        return redirect("/")
+    user_id = request.form['user_id']
+    conn = sqlite3.connect("social.db")
+    c = conn.cursor()
+    c.execute("UPDATE users SET banned=0 WHERE id=?", (user_id,))
+    conn.commit()
     conn.close()
     return redirect("/")
 
@@ -295,12 +383,13 @@ def login():
         password = request.form['password']
         conn = sqlite3.connect("social.db")
         c = conn.cursor()
-        c.execute("SELECT password_hash, is_admin FROM users WHERE username=?", (username,))
+        c.execute("SELECT password_hash, is_admin, banned FROM users WHERE username=?", (username,))
         result = c.fetchone()
         conn.close()
         if result and check_password_hash(result[0], password):
             session['username'] = username
-            session['is_admin'] = result[1] == 1
+            session['is_admin'] = bool(result[1])
+            session['banned'] = result[2]
             return redirect("/")
         return render_template("<p>Login fehlgeschlagen!</p><a href='/login'>Zurück</a>")
 
@@ -319,8 +408,9 @@ def login():
 def logout():
     session.pop('username', None)
     session.pop('is_admin', None)
-    return redirect("/login")
+    session.pop('banned', None)
+    return redirect("/")
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000,)
+    app.run(host="0.0.0.0", port=5000)
