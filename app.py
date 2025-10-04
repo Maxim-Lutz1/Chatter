@@ -8,9 +8,16 @@ from dotenv import load_dotenv
 import os
 
 load_dotenv()
-
 app = Flask(__name__)
 app.secret_key = os.environ["FLASK_SECRET_KEY"]
+
+# Version aus Datei lesen
+def get_version():
+    try:
+        with open("VERSION", "r") as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        return "unknown"
 
 # Datenbank initialisieren
 def init_db():
@@ -33,61 +40,100 @@ def init_db():
 
 init_db()
 
-# Helper: HTML Templates mit CSS
+# HTML Template Helper mit Design + Plattformnamen + Version
 def render_template(content):
+    version = get_version()
     return f"""
     <html>
     <head>
         <title>Chatter</title>
         <style>
             body {{
-                font-family: Arial, sans-serif;
-                background-color: #f0f2f5;
-                padding: 20px;
+                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                background-color: #e8eff6;
+                margin: 0;
+                padding: 0;
             }}
-            h2 {{
-                color: #333;
+            header {{
+                background-color: #4267B2;
+                color: white;
+                padding: 15px 20px;
+                display: flex;
+                flex-direction: column;
+                align-items: flex-start;
+            }}
+            header h1 {{
+                margin: 0;
+                font-size: 28px;
+            }}
+            header small {{
+                font-size: 12px;
+                color: #d0d8f0;
             }}
             .container {{
-                max-width: 600px;
-                margin: 0 auto;
+                max-width: 700px;
+                margin: 30px auto;
                 background-color: #fff;
-                padding: 20px;
-                border-radius: 8px;
-                box-shadow: 0 0 10px rgba(0,0,0,0.1);
+                padding: 25px;
+                border-radius: 10px;
+                box-shadow: 0 4px 12px rgba(0,0,0,0.1);
             }}
             input[type=text], input[type=password] {{
                 width: 100%;
-                padding: 8px;
-                margin: 5px 0;
-                border-radius: 4px;
+                padding: 10px;
+                margin: 8px 0;
+                border-radius: 6px;
                 border: 1px solid #ccc;
+                box-sizing: border-box;
             }}
             button {{
-                padding: 8px 16px;
-                margin-top: 5px;
+                padding: 10px 18px;
                 border: none;
-                border-radius: 4px;
-                background-color: #4CAF50;
+                border-radius: 6px;
+                background-color: #4267B2;
                 color: white;
                 cursor: pointer;
+                margin-top: 5px;
             }}
             button:hover {{
-                background-color: #45a049;
+                background-color: #365899;
             }}
             .post {{
-                background-color: #f9f9f9;
-                padding: 10px;
+                background-color: #f1f3f6;
+                padding: 12px;
                 margin: 10px 0;
-                border-radius: 4px;
+                border-radius: 8px;
+                position: relative;
             }}
             .own-post {{
-                background-color: #d0f0c0;
+                background-color: #d9f0d9;
+            }}
+            .delete-btn {{
+                position: absolute;
+                top: 8px;
+                right: 8px;
+                background-color: #ff4d4f;
+                border: none;
+                color: white;
+                padding: 2px 6px;
+                font-size: 12px;
+                border-radius: 4px;
+                cursor: pointer;
+            }}
+            .delete-btn:hover {{
+                background-color: #cc0000;
             }}
             .header {{
                 display: flex;
                 justify-content: space-between;
                 align-items: center;
+            }}
+            a {{
+                color: #4267B2;
+                text-decoration: none;
+            }}
+            a:hover {{
+                text-decoration: underline;
             }}
             hr {{
                 border: 0;
@@ -97,6 +143,10 @@ def render_template(content):
         </style>
     </head>
     <body>
+        <header>
+            <h1>Chatter</h1>
+            <small>v{version}</small>
+        </header>
         <div class="container">
             {content}
         </div>
@@ -114,17 +164,16 @@ def index():
     c = conn.cursor()
 
     # Allgemeiner Feed
-    c.execute("SELECT posts.text, posts.timestamp, users.username FROM posts JOIN users ON posts.user_id = users.id ORDER BY posts.id DESC")
+    c.execute("SELECT posts.id, posts.text, posts.timestamp, users.username FROM posts JOIN users ON posts.user_id = users.id ORDER BY posts.id DESC")
     all_posts = c.fetchall()
 
     # Eigene Posts
-    c.execute("SELECT posts.text, posts.timestamp FROM posts JOIN users ON posts.user_id = users.id WHERE users.username=? ORDER BY posts.id DESC", (session['username'],))
+    c.execute("SELECT posts.id, posts.text, posts.timestamp FROM posts JOIN users ON posts.user_id = users.id WHERE users.username=? ORDER BY posts.id DESC", (session['username'],))
     own_posts = c.fetchall()
     conn.close()
 
     feed_html = f"""
     <div class="header">
-        <h2>Chatter Feed</h2>
         <p>Angemeldet als <b>{escape(session['username'])}</b> | <a href='/logout'>Logout</a></p>
     </div>
 
@@ -136,12 +185,20 @@ def index():
 
     <h3>Eigene Posts</h3>
     """
-    for text, timestamp in own_posts:
-        feed_html += f"<div class='post own-post'>{escape(timestamp)}: {escape(text)}</div>"
+    for post_id, text, timestamp in own_posts:
+        feed_html += f"""
+        <div class='post own-post'>
+            {escape(timestamp)}: {escape(text)}
+            <form method='POST' action='/delete' style='display:inline;'>
+                <input type='hidden' name='post_id' value='{post_id}'>
+                <button type='submit' class='delete-btn'>Löschen</button>
+            </form>
+        </div>"""
 
     feed_html += "<hr><h3>Allgemeiner Feed</h3>"
-    for text, timestamp, username in all_posts:
-        feed_html += f"<div class='post'><b>{escape(username)}</b> ({timestamp}): {escape(text)}</div>"
+    for post_id, text, timestamp, username in all_posts:
+        cls = "own-post" if username == session['username'] else ""
+        feed_html += f"<div class='post {cls}'><b>{escape(username)}</b> ({timestamp}): {escape(text)}</div>"
 
     return render_template(feed_html)
 
@@ -158,6 +215,23 @@ def post():
     c.execute("INSERT INTO posts (user_id, text, timestamp) VALUES (?, ?, ?)",
               (user_id, text, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
     conn.commit()
+    conn.close()
+    return redirect("/")
+
+# Post löschen
+@app.route("/delete", methods=["POST"])
+def delete_post():
+    if 'username' not in session:
+        return redirect("/login")
+    post_id = request.form['post_id']
+    conn = sqlite3.connect("social.db")
+    c = conn.cursor()
+    # Prüfen, ob der Post dem aktuellen User gehört
+    c.execute("SELECT users.username FROM posts JOIN users ON posts.user_id = users.id WHERE posts.id=?", (post_id,))
+    owner = c.fetchone()
+    if owner and owner[0] == session['username']:
+        c.execute("DELETE FROM posts WHERE id=?", (post_id,))
+        conn.commit()
     conn.close()
     return redirect("/")
 
@@ -220,6 +294,7 @@ def login():
 def logout():
     session.pop('username', None)
     return redirect("/login")
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
