@@ -4,9 +4,13 @@ from markupsafe import escape
 import sqlite3
 from werkzeug.security import generate_password_hash, check_password_hash
 from datetime import datetime
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
 
 app = Flask(__name__)
-app.secret_key = "changeme123"  # Später besser als Umgebungsvariable speichern
+app.secret_key = os.environ["FLASK_SECRET_KEY"]
 
 # Datenbank initialisieren
 def init_db():
